@@ -4,7 +4,7 @@
 ;;                    (gnus "5.13"))
 ;; Author: Joshua Barrett <jjbarr@ptnote.dev>
 ;; Keywords: gnus rss
-;; Version: 0.2
+;; Version: 0.3
 ;; Url: https://github.com/jjbarr/nnnrss
 ;; Created: 8th Mar 2025
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -147,8 +147,18 @@
   nil nnfeed-read-author-function)
 
 (defun nnnrss--read-id (article)
-  (when-let (id (dom-child-by-tag article 'guid))
-    (string-trim (dom-text id))))
+  (or
+   ;;guid
+   (when-let (id (dom-child-by-tag article 'guid))
+     (string-trim (dom-text id)))
+   ;;rss 1.0 rdf:about
+   (dom-attr article 'about)
+   ;;first link
+   (when-let (link (dom-child-by-tag article 'link))
+     (string-trim (dom-text id)))
+   ;;title
+   (when-let (title (dom-child-by-tag article 'title))
+     (string-trim (dom-text title)))))
 (defvoo nnnrss-read-id-function #'nnnrss--read-id
   nil nnfeed-read-id-function)
 
@@ -192,13 +202,15 @@
       ((parts 
         (mapcan
          (lambda (content)
-           (pcase (car-safe elt)
-             ;;we have to kind of put links everywhere because literally none of
-             ;;these are mandatory.
-             ('description
-              `((,(dom-text content) (Content-Type . "text/plain") links)
-                (,(dom-text content) (Content-Type . "text/html") links)))
-             ('encoded `((,(dom-text content) (Content-Type . "text/html")) links))))
+           (and content
+                (pcase (car-safe content)
+                  ;;we have to kind of put links everywhere because literally none of
+                  ;;these are mandatory.
+                  ('description
+                   `((,(dom-text content) (Content-Type . "text/plain") links)
+                     (,(dom-text content) (Content-Type . "text/html") links)))
+                  ('encoded `((,(dom-text content) (Content-Type . "text/html")) links))
+                  (_ ()))))
          (dom-children article))))
       parts
     '((nil (Content-Type . "text/html") links))))
