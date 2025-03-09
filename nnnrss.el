@@ -4,7 +4,7 @@
 ;;                    (gnus "5.13"))
 ;; Author: Joshua Barrett <jjbarr@ptnote.dev>
 ;; Keywords: gnus rss
-;; Version: 0.4
+;; Version: 0.4.1
 ;; Url: https://github.com/jjbarr/nnnrss
 ;; Created: 8th Mar 2025
 ;; SPDX-License-Identifier: GPL-3.0-or-later
