@@ -4,7 +4,7 @@
 ;;                    (gnus "5.13"))
 ;; Author: Joshua Barrett <jjbarr@ptnote.dev>
 ;; Keywords: gnus rss
-;; Version: 0.1
+;; Version: 0.2
 ;; Url: https://github.com/jjbarr/nnnrss
 ;; Created: 8th Mar 2025
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -48,7 +48,6 @@
 (nnfeed-define-basic-backend-interface nnnrss)
 
 (declare-function libxml-parse-xml-region "xml.c")
-(declare-function libxml-parse-html-region "xml.c")
 (defun nnnrss--read-feed (feed _)
   "Return a list structure representing FEED, or nil."
   (if (string-match-p "\\`https?://" feed)
@@ -63,16 +62,19 @@
       (file-error (nnheader-report nnnrss-backend (cdr e)))
       (:success
        (when-let ((data (if (libxml-available-p)
-                            ;; rss is a bit.. well, it's not very picky.
-                            (condition-case e
-                                (libxml-parse-xml-region (point-min) (point-max))
-                              (error (libxml-parse-html-region (point-min) (point-max))))
+                            (libxml-parse-xml-region (point-min) (point-max))
                           (car (xml-parse-region
                                 (point-min) (point-max)))))
                   (authors (list 'authors)))
          (when (eq (car data) 'top)
-           (setq data (assq 'rss data)))
-         (setq data (assq 'channel data))
+           (setq data (or (assq 'rss data)
+                          (assq 'RDF data))))
+         ;; rss 1.0 put items outside of channels. Imagine my surprise.
+         (let ((chan (assq 'channel data)))
+           (while-let ((it (assq 'item data)))
+             (dom-remove-node data it)
+             (dom-add-child-before chan it))
+           (setq data chan))
          (dom-add-child-before data authors)
          (let ((all (dom-children data)))
            (while-let ((rest (cdr all))
@@ -80,9 +82,8 @@
                        (type (car-safe child))
                        ((not (eq type 'item))))
              (when (or (eq type 'managingEditor)
-                       (eq type 'webMaster))
-               ;;unlike atom, rss doesn't have a notion of anything other than
-               ;;freeform text for authors
+                       (eq type 'webMaster)
+                       (eq type 'creator))
                (dom-add-child-before authors child))
              (setq all rest))
            (setcdr all (nreverse (cdr all))))
@@ -108,28 +109,28 @@
     (dom-add-child-before article authors)
     (dolist (child (cddddr article) `(,article . ,(cdr data)))
       (pcase (car-safe child)
-        ('author (dom-add-child-before authors child))
+        ((or 'author 'creator) (dom-add-child-before authors child))
         ((or 'link 'enclosure
              (and 'guid
                   (guard
                    (not (equal "false" (assq 'isPermaLink
                                              (dom-attributes child)))))))
          (dom-add-child-before links child))))))
-(defvoo nnnrss-read-article-function #'nnnrss--read-article
+(defvoo nnnrss-read-article-function 'nnnrss--read-article
   nil nnfeed-read-article-function)
 
 (defun nnnrss--read-title (group)
   "Return the title of GROUP or nil."
   (when-let (title (dom-child-by-tag group 'title))
     (string-trim (dom-text title))))
-(defvoo nnnrss-read-title-function #'nnnrss--read-title
+(defvoo nnnrss-read-title-function 'nnnrss--read-title
   nil nnfeed-read-title-function)
 
 (defun nnnrss--read-description (group)
   "Return the description of GROUP or nil."
   (when-let (desc (dom-child-by-tag group 'description))
     (string-trim (dom-text desc))))
-(defvoo nnnrss-read-description-function #'nnnrss--read-description
+(defvoo nnnrss-read-description-function 'nnnrss--read-description
   nil nnfeed-read-description-function)
 
 ;;; I frankly give up on the mess that is the RSS author field.
@@ -142,7 +143,7 @@
     authors))
 (defvoo nnnrss-read-group-author-function #'nnnrss--read-article-or-group-authors
   nil nnfeed-read-group-author-function)
-(defvoo nnnrss-read-author-function #'nnnrss--read-article-or-group-authors
+(defvoo nnnrss-read-author-function 'nnnrss--read-article-or-group-authors
   nil nnfeed-read-author-function)
 
 (defun nnnrss--read-id (article)
@@ -154,13 +155,14 @@
 (defun nnnrss--read-subject (article)
   (when-let (subject (dom-child-by-tag article 'title))
     (string-trim (dom-text subject))))
-(defvoo nnnrss-read-subject-function #'nnnrss--read-subject
+(defvoo nnnrss-read-subject-function 'nnnrss--read-subject
   nil nnfeed-read-subject-function)
 
 (defun nnnrss--read-publish-date (article)
-  (when-let (date (dom-child-by-tag article 'pubDate))
+  (when-let (date (or (dom-child-by-tag article 'pubDate)
+                      (dom-child-by-tag article 'date)))
     (date-to-time (string-trim (dom-text date)))))
-(defvoo nnnrss-read-publish-date-function #'nnnrss--read-publish-date
+(defvoo nnnrss-read-publish-date-function 'nnnrss--read-publish-date
   nil nnfeed-read-publish-date-function)
 
 (defun nnnrss--read-links (article)
@@ -181,16 +183,26 @@
                (("text/plain") . ,(format "%s: %s" lab l))))))
          (_ ())))
      (dom-children (dom-child-by-tag article 'links)))))
-(defvoo nnnrss-read-links-function #'nnnrss--read-links
+(defvoo nnnrss-read-links-function 'nnnrss--read-links
   nil nnfeed-read-links-function)
 
 (defun nnnrss--read-parts (article)
   "Extract MIME PARTS."
-  (if-let* ((content (dom-child-by-tag article 'description)))
-      `((,(dom-text content) (Content-Type . "text/plain") links)
-        (,(dom-text content) (Content-Type . "text/html") links))
+  (if-let*
+      ((parts 
+        (mapcan
+         (lambda (content)
+           (pcase (car-safe elt)
+             ;;we have to kind of put links everywhere because literally none of
+             ;;these are mandatory.
+             ('description
+              `((,(dom-text content) (Content-Type . "text/plain") links)
+                (,(dom-text content) (Content-Type . "text/html") links)))
+             ('encoded `((,(dom-text content) (Content-Type . "text/html")) links))))
+         (dom-children article))))
+      parts
     '((nil (Content-Type . "text/html") links))))
-(defvoo nnnrss-read-parts-function #'nnnrss--read-parts
+(defvoo nnnrss-read-parts-function 'nnnrss--read-parts
   nil nnfeed-read-parts-function)
 
 (gnus-declare-backend (symbol-name nnnrss-backend) 'none 'address)
